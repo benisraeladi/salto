@@ -19,7 +19,7 @@ import parser from 'fast-xml-parser'
 import { RetrieveResult, FileProperties, RetrieveRequest } from 'jsforce'
 import JSZip from 'jszip'
 import { collections, values as lowerDashValues } from '@salto-io/lowerdash'
-import { Values, StaticFile, InstanceElement } from '@salto-io/adapter-api'
+import { Values, StaticFile, InstanceElement, ElemID } from '@salto-io/adapter-api'
 import { logger } from '@salto-io/logging'
 import { MapKeyFunc, mapKeysRecursive, TransformFunc, transformValues } from '@salto-io/adapter-utils'
 import { API_VERSION } from '../client/client'
@@ -378,6 +378,7 @@ export type DeployPackage = {
   delete(type: MetadataObjectType, name: string): void
   getZip(): Promise<Buffer>
   getDeletionsPackageName(): string
+  getFileNamesToElemIDsMapping(): collections.map.DefaultMap<string, ElemID[]>
 }
 
 export const createDeployPackage = (deleteBeforeUpdate?: boolean): DeployPackage => {
@@ -385,6 +386,7 @@ export const createDeployPackage = (deleteBeforeUpdate?: boolean): DeployPackage
   const addManifest = new collections.map.DefaultMap<string, string[]>(() => [])
   const deleteManifest = new collections.map.DefaultMap<string, string[]>(() => [])
   const deletionsPackageName = deleteBeforeUpdate ? 'destructiveChanges.xml' : 'destructiveChangesPost.xml'
+  const fileNamesToElemIDs = new collections.map.DefaultMap<string, ElemID[]>(() => [])
 
   const addToManifest: DeployPackage['addToManifest'] = (type, name) => {
     const typeName = getManifestTypeName(type)
@@ -393,6 +395,7 @@ export const createDeployPackage = (deleteBeforeUpdate?: boolean): DeployPackage
   return {
     add: async (instance, withManifest = true) => {
       const instanceName = await apiName(instance)
+      const { elemID } = instance
       if (withManifest) {
         addToManifest(assertMetadataObjectType(await instance.getType()), instanceName)
       }
@@ -405,8 +408,10 @@ export const createDeployPackage = (deleteBeforeUpdate?: boolean): DeployPackage
 
         // Add instance metadata
         const metadataValues = _.omit(values, ...Object.keys(fieldToFileToContent))
+        const metadataFileName = complexType.getMetadataFilePath(instanceName, values)
+        fileNamesToElemIDs.get(metadataFileName).push(elemID)
         zip.file(
-          complexType.getMetadataFilePath(instanceName, values),
+          metadataFileName,
           toMetadataXml(
             typeName,
             complexType.sortMetadataValues?.(metadataValues) ?? metadataValues
@@ -417,7 +422,10 @@ export const createDeployPackage = (deleteBeforeUpdate?: boolean): DeployPackage
         const fileNameToContentMaps = Object.values(fieldToFileToContent)
         fileNameToContentMaps.forEach(fileNameToContentMap =>
           Object.entries(fileNameToContentMap)
-            .forEach(([fileName, content]) => zip.file(fileName, content)))
+            .forEach(([fileName, content]) => {
+              zip.file(fileName, content)
+              fileNamesToElemIDs.get(fileName).push(elemID)
+            }))
       } else {
         const { dirName, suffix, hasMetaFile } = (await instance.getType()).annotations
         const instanceContentPath = [
@@ -426,14 +434,18 @@ export const createDeployPackage = (deleteBeforeUpdate?: boolean): DeployPackage
           ...instance.annotations[CONTENT_FILENAME_OVERRIDE] ?? [`${instanceName}${suffix === undefined ? '' : `.${suffix}`}`],
         ].join('/')
         if (hasMetaFile) {
+          const fileName = `${instanceContentPath}${METADATA_XML_SUFFIX}`
+          fileNamesToElemIDs.get(fileName).push(elemID)
           zip.file(
-            `${instanceContentPath}${METADATA_XML_SUFFIX}`,
+            fileName,
             toMetadataXml(typeName, _.omit(values, METADATA_CONTENT_FIELD))
           )
           if (values[METADATA_CONTENT_FIELD] !== undefined) {
+            fileNamesToElemIDs.get(instanceContentPath).push(elemID)
             zip.file(instanceContentPath, values[METADATA_CONTENT_FIELD])
           }
         } else {
+          fileNamesToElemIDs.get(instanceContentPath).push(elemID)
           zip.file(instanceContentPath, toMetadataXml(typeName, values))
         }
       }
@@ -460,5 +472,6 @@ export const createDeployPackage = (deleteBeforeUpdate?: boolean): DeployPackage
       return zip.generateAsync({ type: 'nodebuffer' })
     },
     getDeletionsPackageName: () => deletionsPackageName,
+    getFileNamesToElemIDsMapping: () => fileNamesToElemIDs,
   }
 }

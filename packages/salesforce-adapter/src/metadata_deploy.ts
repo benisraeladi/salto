@@ -27,7 +27,8 @@ import { SaltoError,
   isContainerType,
   isAdditionChange,
   SaltoElementError,
-  SeverityLevel } from '@salto-io/adapter-api'
+  SeverityLevel,
+  ElemID } from '@salto-io/adapter-api'
 import { logger } from '@salto-io/logging'
 
 
@@ -197,6 +198,7 @@ const isUnFoundDelete = (message: DeployMessage, deletionsPackageName: string): 
 const processDeployResponse = (
   result: SFDeployResult,
   deletionsPackageName: string,
+  fileNamesToElemIDs: collections.map.DefaultMap<string, ElemID[]>,
   checkOnly: boolean,
 ): { successfulFullNames: ReadonlyArray<MetadataId>; errors: ReadonlyArray<SaltoError | SaltoElementError> } => {
   const allFailureMessages = makeArray(result.details)
@@ -219,6 +221,7 @@ const processDeployResponse = (
     .filter(failure => !isUnFoundDelete(failure, deletionsPackageName))
     .map(getUserFriendlyDeployMessage)
     .map(failure => ({
+      elemID: fileNamesToElemIDs.get(failure.fileName)[0],
       message: `Failed to ${checkOnly ? 'validate' : 'deploy'} ${failure.fullName} with error: ${failure.problem} (${failure.problemType})`,
       severity: 'Error' as SeverityLevel,
     }))
@@ -379,7 +382,7 @@ export const deployMetadata = async (
   }, undefined, 2))
 
   const { errors, successfulFullNames } = processDeployResponse(
-    sfDeployRes, pkg.getDeletionsPackageName(), checkOnly ?? false
+    sfDeployRes, pkg.getDeletionsPackageName(), pkg.getFileNamesToElemIDsMapping(), checkOnly ?? false
   )
   const isSuccessfulChange = (change: Change<MetadataInstanceElement>): boolean => {
     const changeElem = getChangeData(change)
